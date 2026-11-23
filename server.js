@@ -565,6 +565,11 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Sair voluntariamente da sala
+  socket.on('leave_room', () => {
+    handlePlayerLeave(socket);
+  });
+
   socket.on('disconnect', () => {
     handlePlayerLeave(socket);
   });

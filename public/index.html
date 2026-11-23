@@ -179,6 +179,10 @@
       background: linear-gradient(135deg, #10b981, #059669);
       box-shadow: 0 4px 15px rgba(5, 150, 105, 0.4);
     }
+    .btn-danger {
+      background: linear-gradient(135deg, #ef4444, #b91c1c);
+      box-shadow: 0 4px 15px rgba(220, 38, 38, 0.4);
+    }
 
     /* Grade de 8 Lutadores */
     .char-grid {
@@ -568,9 +572,10 @@
             <button id="btn-copy-code" class="btn btn-secondary" style="padding:5px 10px; font-size:11px;">Copiar</button>
           </div>
         </div>
-        <div style="display:flex; gap:8px; align-items:center;">
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
           <button id="btn-start-tourney" class="btn btn-success" style="display:none;">Iniciar Torneio</button>
           <button id="btn-reset-lobby" class="btn btn-primary" style="display:none;">Novo Torneio</button>
+          <button id="btn-leave-room" class="btn btn-danger">Sair da Sala</button>
         </div>
       </div>
 
@@ -604,7 +609,10 @@
         <div class="hp-track"><div id="you-hp-fill" class="hp-fill"></div></div>
       </div>
 
-      <div id="hud-round" class="round-pill">ARENA 1V1</div>
+      <div style="display:flex; flex-direction:column; align-items:center; gap:6px; pointer-events:auto;">
+        <div id="hud-round" class="round-pill">ARENA 1V1</div>
+        <button id="btn-leave-fight" class="btn btn-danger" style="padding:4px 10px; font-size:10px;">Sair</button>
+      </div>
 
       <div class="fighter-bar">
         <div class="fighter-info">
@@ -1199,6 +1207,25 @@
     document.getElementById('btn-reset-lobby').onclick = () => {
       socket.emit('reset_lobby');
     };
+
+    function leaveCurrentRoom() {
+      if (matchEndTimer) {
+        clearTimeout(matchEndTimer);
+        matchEndTimer = null;
+      }
+      socket.emit('leave_room');
+      inFight = false;
+      currentRoom = null;
+      resetAllInputs();
+      document.getElementById('fight-banner').style.display = 'none';
+      document.getElementById('bracket-title').textContent = 'Chaveamento do Torneio';
+      document.getElementById('lobby-bracket').innerHTML =
+        '<div style="font-size:12px; color:#64748b;">O chaveamento 1v1 será gerado quando o anfitrião iniciar.</div>';
+      switchScreen('screen-home');
+    }
+
+    document.getElementById('btn-leave-room').onclick = leaveCurrentRoom;
+    document.getElementById('btn-leave-fight').onclick = leaveCurrentRoom;
 
     socket.on('error_msg', (msg) => showError(msg));
 
