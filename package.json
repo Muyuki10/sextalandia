@@ -4,6 +4,7 @@
   "description": "Jogo de luta multiplayer 3D em primeira pessoa para Mobile Web",
   "main": "server.js",
   "scripts": {
+    
     "start": "node server.js"
   },
   "dependencies": {

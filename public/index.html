@@ -105,8 +105,21 @@
       text-align: center;
       font-size: 13px;
       color: #94a3b8;
-      margin-bottom: 14px;
+      margin-bottom: 8px;
     }
+
+    .conn-status {
+      text-align: center;
+      font-size: 12px;
+      font-weight: 700;
+      margin-bottom: 12px;
+      padding: 5px 10px;
+      border-radius: 8px;
+      background: rgba(15, 23, 42, 0.8);
+      color: #fbbf24;
+    }
+    .conn-status.online { color: #34d399; }
+    .conn-status.offline { color: #f87171; }
 
     .form-row {
       display: flex;
@@ -128,6 +141,7 @@
       outline: none;
       user-select: text;
       -webkit-user-select: text;
+      touch-action: auto;
     }
     input[type="text"]:focus {
       border-color: #f59e0b;
@@ -144,9 +158,14 @@
       transition: transform 0.1s, filter 0.15s;
       text-transform: uppercase;
       letter-spacing: 0.5px;
+      touch-action: manipulation;
     }
     .btn:active {
       transform: scale(0.96);
+    }
+    .btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
     }
     .btn-primary {
       background: linear-gradient(135deg, #f59e0b, #ea580c);
@@ -184,6 +203,7 @@
       display: flex;
       flex-direction: column;
       gap: 2px;
+      touch-action: manipulation;
     }
     .char-card.selected {
       border-color: #f59e0b;
@@ -252,6 +272,7 @@
       padding: 12px;
       max-height: 220px;
       overflow-y: auto;
+      touch-action: pan-y;
     }
     .box-list h3 {
       font-size: 13px;
@@ -515,6 +536,7 @@
     <div class="panel">
       <div class="title-logo">RING BRAWL 3D</div>
       <div class="subtitle">Torneio Multiplayer em Primeira Pessoa • Até 10 Jogadores</div>
+      <div id="conn-status" class="conn-status">Conectando ao servidor da arena...</div>
 
       <div id="home-error" class="error-banner"></div>
 
@@ -646,8 +668,9 @@
     let myPlayerId = null;
     let currentRoom = null;
     let inFight = false;
+    let matchEndTimer = null;
+    let useLeftArmNext = false;
 
-    // Estado local suavizado da luta
     const fightState = {
       you: { x: 0, z: 2.7, rotY: 0, hp: 100 },
       opp: { x: 0, z: -2.7, rotY: Math.PI, hp: 100, targetX: 0, targetZ: -2.7, targetRotY: Math.PI },
@@ -659,7 +682,7 @@
     };
 
     // =========================================================================
-    // 2. SINTETIZADOR DE ÁUDIO WEB (EFEITOS SONOROS SEM ARQUIVOS EXTERNOS)
+    // 2. SINTETIZADOR DE ÁUDIO WEB
     // =========================================================================
     const SoundFX = (() => {
       let ctx = null;
@@ -725,7 +748,7 @@
       const el = document.getElementById('home-error');
       el.textContent = msg;
       el.style.display = 'block';
-      setTimeout(() => { el.style.display = 'none'; }, 4000);
+      setTimeout(() => { el.style.display = 'none'; }, 4500);
     }
 
     function switchScreen(screenId) {
@@ -749,7 +772,7 @@
     }
 
     // =========================================================================
-    // 4. MOTOR 3D THREE.JS (RINGUE, VISÃO 1ª PESSOA E OS 8 MODELOS LOW-POLY)
+    // 4. MOTOR 3D THREE.JS
     // =========================================================================
     const canvas = document.getElementById('game-canvas');
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
@@ -765,7 +788,6 @@
     camera.rotation.order = 'YXZ';
     scene.add(camera);
 
-    // Iluminação de Arena
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.65);
     scene.add(ambientLight);
 
@@ -784,11 +806,9 @@
     rimLight2.position.set(6, 4, 6);
     scene.add(rimLight2);
 
-    // Construção do Ringue 3D
     function buildRing() {
       const ringGroup = new THREE.Group();
 
-      // Lona azul do ringue (9.5 x 9.5m)
       const matGeo = new THREE.BoxGeometry(9.6, 0.5, 9.6);
       const matMat = new THREE.MeshStandardMaterial({ color: 0x1e3a8a, roughness: 0.75 });
       const matMesh = new THREE.Mesh(matGeo, matMat);
@@ -796,7 +816,6 @@
       matMesh.receiveShadow = true;
       ringGroup.add(matMesh);
 
-      // Linha central e borda branca
       const borderGeo = new THREE.RingGeometry(3.8, 4.1, 4);
       const borderMat = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide });
       const borderMesh = new THREE.Mesh(borderGeo, borderMat);
@@ -805,7 +824,6 @@
       borderMesh.position.y = 0.01;
       ringGroup.add(borderMesh);
 
-      // 4 Postes de canto
       const cornerCoords = [
         [-4.5, -4.5, 0xef4444],
         [4.5, -4.5, 0x3b82f6],
@@ -821,7 +839,6 @@
         ringGroup.add(post);
       });
 
-      // 3 Cordas em cada um dos 4 lados
       const ropeHeights = [0.55, 0.95, 1.35];
       const ropeColors = [0xef4444, 0xffffff, 0x3b82f6];
       ropeHeights.forEach((h, idx) => {
@@ -847,7 +864,6 @@
         ringGroup.add(east);
       });
 
-      // Arquibancada estilizada ao redor
       const crowdMat = new THREE.MeshStandardMaterial({ color: 0x111827 });
       const arenaFloor = new THREE.Mesh(new THREE.PlaneGeometry(45, 45), crowdMat);
       arenaFloor.rotation.x = -Math.PI / 2;
@@ -858,7 +874,7 @@
     }
     buildRing();
 
-    // Braços e Pé em Primeira Pessoa (anexados à câmera)
+    // Braços e Pé em Primeira Pessoa
     const fpGroup = new THREE.Group();
     const leftArm = new THREE.Mesh(
       new THREE.BoxGeometry(0.18, 0.18, 0.55),
@@ -899,7 +915,6 @@
       }
     }
 
-    // Construtor dos 8 Modelos 3D Estilizados (todos orientados olhando para -Z)
     function createFighterMesh(charId) {
       const root = new THREE.Group();
       const parts = { hitMaterials: [] };
@@ -919,7 +934,6 @@
         return mat;
       }
 
-      // Proporções específicas por personagem
       let scaleY = 1.0;
       let scaleXZ = 1.0;
       let skinColor = 0xf1c27d;
@@ -971,7 +985,6 @@
         shortsColor = 0x134e4a;
       }
 
-      // Pernas (ou cauda espectral para o fantasma)
       if (charId === 'fantasma') {
         const tail = new THREE.Mesh(new THREE.ConeGeometry(0.32, 0.85, 8), makeMat(0x2dd4bf));
         tail.rotation.x = Math.PI;
@@ -987,7 +1000,6 @@
         parts.rightLeg = rightLeg;
       }
 
-      // Tronco
       const torso = new THREE.Mesh(
         new THREE.BoxGeometry(0.56, 0.68, 0.32),
         makeMat(torsoColor, { metalness: charId === 'robo' ? 0.8 : 0.1 })
@@ -995,7 +1007,6 @@
       torso.position.y = 1.05;
       root.add(torso);
 
-      // Cabeça
       const head = new THREE.Mesh(
         new THREE.BoxGeometry(0.42, 0.42, 0.42),
         makeMat(skinColor, { metalness: charId === 'robo' ? 0.8 : 0.1 })
@@ -1003,7 +1014,6 @@
       head.position.y = 1.64;
       root.add(head);
 
-      // Olhos (voltados para -Z)
       const eyeMat = makeMat(charId === 'robo' ? 0x38bdf8 : 0x111827);
       const eyeL = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.07, 0.05), eyeMat);
       eyeL.position.set(-0.1, 1.68, -0.21);
@@ -1011,9 +1021,7 @@
       eyeR.position.x = 0.1;
       root.add(eyeL, eyeR);
 
-      // Detalhes exclusivos de cada um dos 8 personagens
       if (charId === 'macaco') {
-        // Nariz gigante característico + orelhas + cauda
         const nose = new THREE.Mesh(new THREE.SphereGeometry(0.14, 10, 10), makeMat(0xd97706));
         nose.scale.set(0.85, 1.35, 1.2);
         nose.position.set(0, 1.58, -0.26);
@@ -1026,7 +1034,6 @@
         tail.position.set(0, 0.85, 0.35);
         root.add(nose, earL, earR, tail);
       } else if (charId === 'indigena') {
-        // Cocar de penas coloridas + pinturas tribais vermelhas
         const featherColors = [0xef4444, 0xf59e0b, 0x10b981, 0x3b82f6, 0xef4444];
         featherColors.forEach((fc, idx) => {
           const angle = (idx - 2) * 0.28;
@@ -1041,14 +1048,12 @@
         paintR.position.x = 0.11;
         root.add(paintL, paintR);
       } else if (charId === 'japones') {
-        // Faixa vermelha na cabeça (Hachimaki) + faixa preta no kimono
         const band = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.08, 0.45), makeMat(0xef4444));
         band.position.y = 1.77;
         const belt = new THREE.Mesh(new THREE.BoxGeometry(0.59, 0.09, 0.35), makeMat(0x111827));
         belt.position.y = 0.82;
         root.add(band, belt);
       } else if (charId === 'robo') {
-        // Antena luminosa + núcleo peitoral ciano
         const ant = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.26, 6), makeMat(0x38bdf8));
         ant.position.y = 1.96;
         const core = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.06, 12), makeMat(0x38bdf8));
@@ -1056,7 +1061,6 @@
         core.position.set(0, 1.12, -0.17);
         root.add(ant, core);
       } else if (charId === 'nerdola') {
-        // Óculos grandes com lentes brancas + gravata vermelha
         const frameL = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.13, 0.05), makeMat(0x111827));
         frameL.position.set(-0.11, 1.67, -0.22);
         const frameR = frameL.clone();
@@ -1069,19 +1073,16 @@
         tie.position.set(0, 1.1, -0.17);
         root.add(frameL, frameR, lensL, lensR, tie);
       } else if (charId === 'queixo') {
-        // Mandíbula / Queixo gigante projetado para frente
         const jaw = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.22, 0.34), makeMat(skinColor));
         jaw.position.set(0, 1.48, -0.18);
         root.add(jaw);
       } else if (charId === 'menino_forte') {
-        // Peitoral largo exagerado + cabelo espetado
         const chest = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.42, 0.42), makeMat(torsoColor));
         chest.position.y = 1.18;
         const hair = new THREE.Mesh(new THREE.ConeGeometry(0.24, 0.25, 5), makeMat(0x78350f));
         hair.position.y = 1.94;
         root.add(chest, hair);
       } else if (charId === 'fantasma') {
-        // Quepe militar de Comandante da 2ª Guerra com insígnia dourada
         const capBase = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.23, 0.14, 12), makeMat(0x0f766e));
         capBase.position.y = 1.88;
         const visor = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.04, 0.22), makeMat(0x042f2e));
@@ -1091,7 +1092,6 @@
         root.add(capBase, visor, badge);
       }
 
-      // Braços articulados para animação de soco
       const armGeo = new THREE.BoxGeometry(0.18, 0.18, 0.56);
       const gloveMat = makeMat(getCharMeta(charId).gloveColor);
 
@@ -1128,15 +1128,45 @@
     // =========================================================================
     // 5. CONEXÃO SOCKET.IO E EVENTOS DO TORNEIO
     // =========================================================================
-    const socket = io();
+    const connStatusEl = document.getElementById('conn-status');
+    const btnCreate = document.getElementById('btn-create-room');
+    const btnJoin = document.getElementById('btn-join-room');
 
-    document.getElementById('btn-create-room').onclick = () => {
+    if (typeof io === 'undefined') {
+      connStatusEl.textContent = 'Erro: Servidor Node.js/Socket.IO não encontrado (não use hospedagem estática como Vercel).';
+      connStatusEl.className = 'conn-status offline';
+      btnCreate.disabled = true;
+      btnJoin.disabled = true;
+    }
+
+    const socket = typeof io !== 'undefined' ? io() : { on: () => {}, emit: () => {}, connected: false };
+
+    socket.on('connect', () => {
+      connStatusEl.textContent = '● Conectado à Arena Online';
+      connStatusEl.className = 'conn-status online';
+      btnCreate.disabled = false;
+      btnJoin.disabled = false;
+    });
+
+    socket.on('disconnect', () => {
+      connStatusEl.textContent = 'Desconectado. Reconectando ao servidor...';
+      connStatusEl.className = 'conn-status offline';
+    });
+
+    socket.on('connect_error', () => {
+      connStatusEl.textContent = 'Aguardando servidor iniciar (pode levar até 40s no plano gratuito)...';
+      connStatusEl.className = 'conn-status';
+    });
+
+    btnCreate.onclick = () => {
+      if (!socket.connected) return showError('Aguarde o servidor conectar antes de criar a sala.');
       const name = document.getElementById('input-name').value.trim();
       if (!name) return showError('Digite seu apelido antes de criar a sala.');
       socket.emit('create_room', { name, character: selectedCharacter });
     };
 
-    document.getElementById('btn-join-room').onclick = () => {
+    btnJoin.onclick = () => {
+      if (!socket.connected) return showError('Aguarde o servidor conectar antes de entrar.');
       const name = document.getElementById('input-name').value.trim();
       const code = document.getElementById('input-room-code').value.trim();
       if (!name) return showError('Digite seu apelido antes de entrar na sala.');
@@ -1146,7 +1176,17 @@
 
     document.getElementById('btn-copy-code').onclick = () => {
       if (!currentRoom) return;
-      navigator.clipboard?.writeText(currentRoom.code);
+      const codeText = currentRoom.code;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(codeText).catch(() => {});
+      } else {
+        const tmp = document.createElement('textarea');
+        tmp.value = codeText;
+        document.body.appendChild(tmp);
+        tmp.select();
+        document.execCommand('copy');
+        tmp.remove();
+      }
       const btn = document.getElementById('btn-copy-code');
       btn.textContent = 'Copiado!';
       setTimeout(() => { btn.textContent = 'Copiar'; }, 1500);
@@ -1190,7 +1230,6 @@
         statusMsg.textContent = `🏆 GRANDE CAMPEÃO: ${room.tournament.champion.name.toUpperCase()}!`;
       }
 
-      // Renderiza lista de jogadores
       const playersContainer = document.getElementById('lobby-players');
       playersContainer.innerHTML = '';
       room.players.forEach((p) => {
@@ -1208,7 +1247,6 @@
         playersContainer.appendChild(row);
       });
 
-      // Renderiza chaveamento
       const bracketContainer = document.getElementById('lobby-bracket');
       if (room.tournament && room.tournament.matches.length > 0) {
         document.getElementById('bracket-title').textContent = `Chaves — ${room.tournament.roundName}`;
@@ -1233,6 +1271,12 @@
 
     // Início de Luta 1v1 no Ringue
     socket.on('match_start', ({ roundName, you, opponent }) => {
+      if (matchEndTimer) {
+        clearTimeout(matchEndTimer);
+        matchEndTimer = null;
+      }
+
+      resetAllInputs();
       inFight = true;
       fightState.you = { x: you.x, z: you.z, rotY: you.rotY, hp: 100 };
       fightState.opp = {
@@ -1244,6 +1288,11 @@
         targetZ: opponent.z,
         targetRotY: opponent.rotY
       };
+      fightState.punchAnim = 0;
+      fightState.kickAnim = 0;
+      fightState.oppPunchAnim = 0;
+      fightState.oppKickAnim = 0;
+      fightState.oppHitFlash = 0;
 
       updateFirstPersonGloves(you.character);
       spawnOpponentModel(opponent.character);
@@ -1275,8 +1324,12 @@
       SoundFX.playSwing(isKick);
 
       if (attackerId === myPlayerId) {
-        if (isKick) fightState.kickAnim = 1.0;
-        else fightState.punchAnim = 1.0;
+        if (isKick) {
+          fightState.kickAnim = 1.0;
+        } else {
+          fightState.punchAnim = 1.0;
+          useLeftArmNext = !useLeftArmNext;
+        }
       } else {
         if (isKick) fightState.oppKickAnim = 1.0;
         else fightState.oppPunchAnim = 1.0;
@@ -1301,6 +1354,7 @@
     });
 
     socket.on('match_end', ({ result, reason, winnerName }) => {
+      resetAllInputs();
       const banner = document.getElementById('fight-banner');
       const title = document.getElementById('banner-title');
       const sub = document.getElementById('banner-sub');
@@ -1316,7 +1370,9 @@
         sub.textContent = `${winnerName} venceu. Voltando ao lobby de espera...`;
       }
 
-      setTimeout(() => {
+      if (matchEndTimer) clearTimeout(matchEndTimer);
+      matchEndTimer = setTimeout(() => {
+        matchEndTimer = null;
         inFight = false;
         banner.style.display = 'none';
         switchScreen('screen-lobby');
@@ -1347,6 +1403,19 @@
     const joyArea = document.getElementById('joystick-area');
     const joyKnob = document.getElementById('joystick-knob');
     let joyTouchId = null;
+    const keys = {};
+
+    function resetJoystick() {
+      joyTouchId = null;
+      inputState.moveX = 0;
+      inputState.moveZ = 0;
+      joyKnob.style.transform = 'translate(0px, 0px)';
+    }
+
+    function resetAllInputs() {
+      resetJoystick();
+      for (const k in keys) delete keys[k];
+    }
 
     joyArea.addEventListener('touchstart', (e) => {
       e.preventDefault();
@@ -1364,12 +1433,6 @@
       }
     }, { passive: false });
 
-    function resetJoystick() {
-      joyTouchId = null;
-      inputState.moveX = 0;
-      inputState.moveZ = 0;
-      joyKnob.style.transform = 'translate(0px, 0px)';
-    }
     joyArea.addEventListener('touchend', resetJoystick);
     joyArea.addEventListener('touchcancel', resetJoystick);
 
@@ -1393,7 +1456,6 @@
       inputState.moveZ = dy / maxRadius;
     }
 
-    // Rotação de Câmera por Deslize no Centro da Tela
     const lookArea = document.getElementById('look-area');
     let lookTouchId = null;
     let lastLookX = 0;
@@ -1419,7 +1481,6 @@
     lookArea.addEventListener('touchend', () => { lookTouchId = null; });
     lookArea.addEventListener('touchcancel', () => { lookTouchId = null; });
 
-    // Botões de Soco e Chute com indicador visual de recarga
     let localPunchCd = 0;
     let localKickCd = 0;
 
@@ -1458,28 +1519,31 @@
       triggerAttack('kick');
     }, { passive: false });
 
-    // Suporte extra para cliques/teclado caso teste no navegador do PC
     document.getElementById('btn-punch').addEventListener('mousedown', () => triggerAttack('punch'));
     document.getElementById('btn-kick').addEventListener('mousedown', () => triggerAttack('kick'));
 
-    const keys = {};
     window.addEventListener('keydown', (e) => {
+      if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
       keys[e.code] = true;
       if (e.code === 'Space' || e.code === 'KeyJ') triggerAttack('punch');
       if (e.code === 'KeyK' || e.code === 'ShiftLeft') triggerAttack('kick');
     });
     window.addEventListener('keyup', (e) => { keys[e.code] = false; });
 
-    // Envia inputs ao servidor a 30Hz
-    setInterval(() => {
-      if (!inFight) return;
+    function getCombinedMovement() {
       let mx = inputState.moveX;
       let mz = inputState.moveZ;
-
       if (keys['KeyW'] || keys['ArrowUp']) mz = -1;
       if (keys['KeyS'] || keys['ArrowDown']) mz = 1;
       if (keys['KeyA']) mx = -1;
       if (keys['KeyD']) mx = 1;
+      return { mx, mz };
+    }
+
+    // Envia inputs ao servidor a 30Hz
+    setInterval(() => {
+      if (!inFight) return;
+      const { mx, mz } = getCombinedMovement();
       if (keys['ArrowLeft']) fightState.you.rotY += 0.06;
       if (keys['ArrowRight']) fightState.you.rotY -= 0.06;
 
@@ -1501,23 +1565,30 @@
       lastTime = now;
 
       if (inFight) {
-        // Posiciona câmera em primeira pessoa (altura dos olhos = 1.55m)
+        const { mx, mz } = getCombinedMovement();
         camera.position.set(fightState.you.x, 1.55, fightState.you.z);
         camera.rotation.y = fightState.you.rotY;
 
-        // Balanço natural ao caminhar
-        const walkBob = Math.hypot(inputState.moveX, inputState.moveZ) > 0.1
+        const walkBob = Math.hypot(mx, mz) > 0.1
           ? Math.sin(now * 0.014) * 0.035
           : 0;
         camera.position.y = 1.55 + walkBob;
 
-        // Animação dos punhos em 1ª pessoa
+        // Animação alternada dos punhos em 1ª pessoa
         if (fightState.punchAnim > 0) {
           fightState.punchAnim = Math.max(0, fightState.punchAnim - dt * 5.2);
           const thrust = Math.sin(fightState.punchAnim * Math.PI) * 0.48;
-          rightArm.position.z = -0.45 - thrust;
-          rightArm.position.x = 0.34 - thrust * 0.35;
+          if (useLeftArmNext) {
+            leftArm.position.z = -0.45 - thrust;
+            leftArm.position.x = -0.34 + thrust * 0.35;
+            rightArm.position.set(0.34, -0.32 + walkBob * 0.5, -0.45);
+          } else {
+            rightArm.position.z = -0.45 - thrust;
+            rightArm.position.x = 0.34 - thrust * 0.35;
+            leftArm.position.set(-0.34, -0.32 + walkBob * 0.5, -0.45);
+          }
         } else {
+          leftArm.position.set(-0.34, -0.32 + walkBob * 0.5, -0.45);
           rightArm.position.set(0.34, -0.32 + walkBob * 0.5, -0.45);
         }
 
@@ -1539,7 +1610,6 @@
           opponentEntity.mesh.position.set(fightState.opp.x, 0, fightState.opp.z);
           opponentEntity.mesh.rotation.y = fightState.opp.targetRotY;
 
-          // Animação de ataque do oponente
           if (fightState.oppPunchAnim > 0) {
             fightState.oppPunchAnim = Math.max(0, fightState.oppPunchAnim - dt * 5);
             opponentEntity.parts.rightArm.rotation.x = Math.sin(fightState.oppPunchAnim * Math.PI) * 1.1;
@@ -1554,7 +1624,6 @@
             opponentEntity.parts.rightLeg.rotation.x = 0;
           }
 
-          // Flash vermelho no adversário ao receber golpe
           if (fightState.oppHitFlash > 0) {
             fightState.oppHitFlash = Math.max(0, fightState.oppHitFlash - dt * 5);
             opponentEntity.parts.hitMaterials.forEach((m) => {
@@ -1568,7 +1637,6 @@
           }
         }
       } else {
-        // Câmera orbital suave enquanto está na tela inicial ou lobby
         const t = now * 0.00035;
         camera.position.set(Math.sin(t) * 6.5, 3.2, Math.cos(t) * 6.5);
         camera.lookAt(0, 1.0, 0);
