@@ -7,11 +7,16 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: '*' },
-  pingInterval: 5000,
-  pingTimeout: 10000
+  pingInterval: 10000,
+  pingTimeout: 20000
 });
 
-app.use(express.static(path.join(__dirname, 'public')));
+const publicPath = path.join(__dirname, 'public');
+app.use(express.static(publicPath));
+
+app.get('/', (req, res) => {
+  res.sendFile(path.join(publicPath, 'index.html'));
+});
 
 // Configurações autoritativas da arena e combate
 const TICK_RATE = 60;
@@ -29,7 +34,7 @@ const VALID_CHARACTERS = [
   'fantasma'
 ];
 
-// Atributos balanceados por personagem (velocidade e multiplicador leve)
+// Atributos balanceados por personagem
 const CHAR_STATS = {
   macaco:       { speed: 5.6, punchDmg: 12, kickDmg: 22, punchCd: 340, kickCd: 720 },
   indigena:     { speed: 5.3, punchDmg: 13, kickDmg: 24, punchCd: 360, kickCd: 750 },
@@ -69,6 +74,13 @@ function sanitizeName(raw) {
   return clean || 'Lutador';
 }
 
+function clearRoundTimer(room) {
+  if (room && room.roundTimer) {
+    clearTimeout(room.roundTimer);
+    room.roundTimer = null;
+  }
+}
+
 function broadcastRoomState(room) {
   const playersList = Array.from(room.players.values()).map((p) => ({
     id: p.id,
@@ -96,6 +108,17 @@ function broadcastRoomState(room) {
 }
 
 function startTournamentRound(room) {
+  clearRoundTimer(room);
+
+  if (!room.tournament) {
+    room.tournament = {
+      roundNumber: 0,
+      roundName: '',
+      matches: [],
+      champion: null
+    };
+  }
+
   const alivePlayers = Array.from(room.players.values()).filter((p) => !p.eliminated);
 
   // Se restou apenas 1 jogador, temos o grande campeão
@@ -136,6 +159,7 @@ function startTournamentRound(room) {
     if (!p2) {
       // Número ímpar de jogadores: p1 avança automaticamente (BYE)
       p1.inMatch = false;
+      p1.input = { moveX: 0, moveZ: 0 };
       room.tournament.matches.push({
         matchId: `R${room.tournament.roundNumber}-M${matchIndex++}`,
         p1: { id: p1.id, name: p1.name, character: p1.character },
@@ -148,11 +172,12 @@ function startTournamentRound(room) {
       p1.inMatch = true;
       p2.inMatch = true;
 
-      // Posições iniciais nos cantos opostos do ringue
+      // Posições iniciais nos cantos opostos do ringue e reset de inputs
       p1.x = 0;
       p1.z = 2.7;
       p1.rotY = 0; // Olhando para -Z
       p1.hp = 100;
+      p1.input = { moveX: 0, moveZ: 0 };
       p1.lastPunch = 0;
       p1.lastKick = 0;
 
@@ -160,6 +185,7 @@ function startTournamentRound(room) {
       p2.z = -2.7;
       p2.rotY = Math.PI; // Olhando para +Z
       p2.hp = 100;
+      p2.input = { moveX: 0, moveZ: 0 };
       p2.lastPunch = 0;
       p2.lastKick = 0;
 
@@ -211,10 +237,12 @@ function resolveFight(room, fight, winnerId, loserId, reason = 'KO') {
   if (winner) {
     winner.inMatch = false;
     winner.hp = 100;
+    winner.input = { moveX: 0, moveZ: 0 };
   }
   if (loser) {
     loser.inMatch = false;
     loser.eliminated = true;
+    loser.input = { moveX: 0, moveZ: 0 };
   }
 
   const matchObj = room.tournament?.matches.find((m) => m.matchId === fight.matchId);
@@ -240,9 +268,10 @@ function resolveFight(room, fight, winnerId, loserId, reason = 'KO') {
 
   broadcastRoomState(room);
 
-  // Se todas as lutas da fase terminaram, inicia a próxima fase após 3.5 segundos
-  if (room.activeFights.size === 0 && room.status === 'IN_TOURNAMENT') {
-    setTimeout(() => {
+  // Se todas as lutas da fase terminaram, agenda a próxima fase após 3.5 segundos
+  if (room.activeFights.size === 0 && room.status === 'IN_TOURNAMENT' && !room.roundTimer) {
+    room.roundTimer = setTimeout(() => {
+      room.roundTimer = null;
       if (rooms.has(room.code) && room.status === 'IN_TOURNAMENT' && room.activeFights.size === 0) {
         startTournamentRound(room);
       }
@@ -250,9 +279,57 @@ function resolveFight(room, fight, winnerId, loserId, reason = 'KO') {
   }
 }
 
+function handlePlayerLeave(socket) {
+  const code = socket.roomCode;
+  if (!code || !rooms.has(code)) return;
+
+  const room = rooms.get(code);
+  socket.leave(code);
+  socket.roomCode = null;
+
+  const leavingPlayer = room.players.get(socket.id);
+  if (!leavingPlayer) return;
+
+  let activeFight = null;
+  for (const fight of room.activeFights.values()) {
+    if (fight.p1Id === socket.id || fight.p2Id === socket.id) {
+      activeFight = fight;
+      break;
+    }
+  }
+
+  room.players.delete(socket.id);
+
+  if (room.players.size === 0) {
+    clearRoundTimer(room);
+    rooms.delete(code);
+    return;
+  }
+
+  // Transfere liderança caso o anfitrião saia
+  if (room.hostId === socket.id) {
+    room.hostId = room.players.keys().next().value;
+  }
+
+  if (activeFight && !activeFight.finished) {
+    const winnerId = activeFight.p1Id === socket.id ? activeFight.p2Id : activeFight.p1Id;
+    resolveFight(room, activeFight, winnerId, socket.id, 'WO');
+  } else {
+    const alivePlayers = Array.from(room.players.values()).filter((p) => !p.eliminated);
+    if (room.status === 'IN_TOURNAMENT' && room.activeFights.size === 0 && alivePlayers.length <= 1) {
+      startTournamentRound(room);
+    } else {
+      broadcastRoomState(room);
+    }
+  }
+}
+
 io.on('connection', (socket) => {
   // Criar Sala Privada
-  socket.on('create_room', ({ name, character }) => {
+  socket.on('create_room', (payload = {}) => {
+    const { name, character } = payload || {};
+    if (socket.roomCode) handlePlayerLeave(socket);
+
     const cleanName = sanitizeName(name);
     const charId = VALID_CHARACTERS.includes(character) ? character : 'macaco';
     const code = generateRoomCode();
@@ -263,7 +340,8 @@ io.on('connection', (socket) => {
       status: 'LOBBY',
       players: new Map(),
       tournament: null,
-      activeFights: new Map()
+      activeFights: new Map(),
+      roundTimer: null
     };
 
     room.players.set(socket.id, {
@@ -290,7 +368,8 @@ io.on('connection', (socket) => {
   });
 
   // Entrar em Sala Privada existente
-  socket.on('join_room', ({ code, name, character }) => {
+  socket.on('join_room', (payload = {}) => {
+    const { code, name, character } = payload || {};
     const normalizedCode = typeof code === 'string' ? code.trim().toUpperCase() : '';
     const room = rooms.get(normalizedCode);
 
@@ -303,6 +382,8 @@ io.on('connection', (socket) => {
     if (room.players.size >= MAX_PLAYERS) {
       return socket.emit('error_msg', 'Sala lotada (máximo de 10 jogadores).');
     }
+
+    if (socket.roomCode) handlePlayerLeave(socket);
 
     const cleanName = sanitizeName(name);
     const charId = VALID_CHARACTERS.includes(character) ? character : 'macaco';
@@ -333,15 +414,18 @@ io.on('connection', (socket) => {
   socket.on('start_tournament', () => {
     const room = rooms.get(socket.roomCode);
     if (!room || room.hostId !== socket.id) return;
+    if (room.status === 'IN_TOURNAMENT') return;
     if (room.players.size < 2) {
       return socket.emit('error_msg', 'É necessário pelo menos 2 jogadores para iniciar.');
     }
 
+    clearRoundTimer(room);
     room.status = 'IN_TOURNAMENT';
     room.players.forEach((p) => {
       p.eliminated = false;
       p.inMatch = false;
       p.hp = 100;
+      p.input = { moveX: 0, moveZ: 0 };
     });
 
     room.tournament = {
@@ -359,6 +443,7 @@ io.on('connection', (socket) => {
     const room = rooms.get(socket.roomCode);
     if (!room || room.hostId !== socket.id) return;
 
+    clearRoundTimer(room);
     room.status = 'LOBBY';
     room.tournament = null;
     room.activeFights.clear();
@@ -366,22 +451,24 @@ io.on('connection', (socket) => {
       p.eliminated = false;
       p.inMatch = false;
       p.hp = 100;
+      p.input = { moveX: 0, moveZ: 0 };
     });
 
     broadcastRoomState(room);
   });
 
   // Receber comandos de movimento e rotação do jogador
-  socket.on('player_input', ({ moveX, moveZ, rotY }) => {
+  socket.on('player_input', (payload) => {
+    if (!payload || typeof payload !== 'object') return;
     const room = rooms.get(socket.roomCode);
     if (!room || room.status !== 'IN_TOURNAMENT') return;
 
     const player = room.players.get(socket.id);
     if (!player || !player.inMatch) return;
 
-    const mx = Number(moveX);
-    const mz = Number(moveZ);
-    const ry = Number(rotY);
+    const mx = Number(payload.moveX);
+    const mz = Number(payload.moveZ);
+    const ry = Number(payload.rotY);
 
     if (Number.isFinite(mx) && Number.isFinite(mz)) {
       const len = Math.hypot(mx, mz);
@@ -399,14 +486,14 @@ io.on('connection', (socket) => {
   });
 
   // Processar ataque autoritativo (Soco ou Chute)
-  socket.on('player_attack', ({ type }) => {
+  socket.on('player_attack', (payload) => {
+    if (!payload || typeof payload !== 'object') return;
     const room = rooms.get(socket.roomCode);
     if (!room || room.status !== 'IN_TOURNAMENT') return;
 
     const attacker = room.players.get(socket.id);
     if (!attacker || !attacker.inMatch) return;
 
-    // Encontra a luta ativa do atacante
     let currentFight = null;
     for (const fight of room.activeFights.values()) {
       if (fight.p1Id === attacker.id || fight.p2Id === attacker.id) {
@@ -422,9 +509,9 @@ io.on('connection', (socket) => {
 
     const now = Date.now();
     const stats = CHAR_STATS[attacker.character] || CHAR_STATS.macaco;
-    const isKick = type === 'kick';
+    const isKick = payload.type === 'kick';
 
-    // Validação de cooldown no servidor (anti-trapaça)
+    // Validação de cooldown no servidor
     if (isKick) {
       if (now - attacker.lastKick < stats.kickCd) return;
       attacker.lastKick = now;
@@ -433,7 +520,6 @@ io.on('connection', (socket) => {
       attacker.lastPunch = now;
     }
 
-    // Notifica ambos os jogadores da animação de ataque
     const attackPayload = {
       attackerId: attacker.id,
       type: isKick ? 'kick' : 'punch'
@@ -448,19 +534,16 @@ io.on('connection', (socket) => {
     const dist = Math.hypot(dx, dz);
 
     if (dist <= reach) {
-      // Vetor frontal do atacante (Three.js: rotY=0 aponta para -Z)
       const fwdX = -Math.sin(attacker.rotY);
       const fwdZ = -Math.cos(attacker.rotY);
       const dirX = dist > 0.001 ? dx / dist : fwdX;
       const dirZ = dist > 0.001 ? dz / dist : fwdZ;
       const dot = fwdX * dirX + fwdZ * dirZ;
 
-      // Cone de acerto (~65 graus para cada lado)
       if (dot >= 0.42) {
         const damage = isKick ? stats.kickDmg : stats.punchDmg;
         defender.hp = Math.max(0, defender.hp - damage);
 
-        // Empurrão (Knockback) respeitando as cordas do ringue
         const knockback = isKick ? 0.65 : 0.32;
         defender.x = Math.max(-RING_LIMIT, Math.min(RING_LIMIT, defender.x + dirX * knockback));
         defender.z = Math.max(-RING_LIMIT, Math.min(RING_LIMIT, defender.z + dirZ * knockback));
@@ -482,48 +565,8 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Tratamento de desconexão (Vitória por W.O. se estiver no meio da luta)
   socket.on('disconnect', () => {
-    const code = socket.roomCode;
-    if (!code || !rooms.has(code)) return;
-
-    const room = rooms.get(code);
-    const leavingPlayer = room.players.get(socket.id);
-    if (!leavingPlayer) return;
-
-    // Verifica se o jogador estava em uma luta ativa
-    let activeFight = null;
-    for (const fight of room.activeFights.values()) {
-      if (fight.p1Id === socket.id || fight.p2Id === socket.id) {
-        activeFight = fight;
-        break;
-      }
-    }
-
-    room.players.delete(socket.id);
-
-    if (room.players.size === 0) {
-      rooms.delete(code);
-      return;
-    }
-
-    // Transfere liderança caso o anfitrião saia
-    if (room.hostId === socket.id) {
-      const nextHost = room.players.keys().next().value;
-      room.hostId = nextHost;
-    }
-
-    if (activeFight && !activeFight.finished) {
-      const winnerId = activeFight.p1Id === socket.id ? activeFight.p2Id : activeFight.p1Id;
-      resolveFight(room, activeFight, winnerId, socket.id, 'WO');
-    } else {
-      // Se estava no torneio aguardando ou era BYE, verifica se sobrou apenas 1 campeão
-      if (room.status === 'IN_TOURNAMENT' && room.activeFights.size === 0) {
-        startTournamentRound(room);
-      } else {
-        broadcastRoomState(room);
-      }
-    }
+    handlePlayerLeave(socket);
   });
 });
 
@@ -544,13 +587,11 @@ setInterval(() => {
         const stats = CHAR_STATS[p.character] || CHAR_STATS.macaco;
         const speed = stats.speed;
 
-        // Movimento relativo à direção que o lutador está olhando
         const fwdX = -Math.sin(p.rotY);
         const fwdZ = -Math.cos(p.rotY);
         const rightX = Math.cos(p.rotY);
         const rightZ = -Math.sin(p.rotY);
 
-        // moveZ negativo = frente, moveX positivo = direita
         const forwardAmount = -p.input.moveZ;
         const strafeAmount = p.input.moveX;
 
@@ -561,27 +602,27 @@ setInterval(() => {
         p.z = Math.max(-RING_LIMIT, Math.min(RING_LIMIT, p.z + vz * dt));
       });
 
-      // Colisão suave entre os corpos dos dois lutadores para não atravessarem um ao outro
+      // Colisão suave entre os corpos dos dois lutadores
       const dx = p2.x - p1.x;
       const dz = p2.z - p1.z;
       const dist = Math.hypot(dx, dz);
       const minDist = 0.85;
-      if (dist < minDist && dist > 0.0001) {
+      if (dist < minDist) {
         const overlap = (minDist - dist) * 0.5;
-        const nx = dx / dist;
-        const nz = dz / dist;
+        const nx = dist > 0.0001 ? dx / dist : 0;
+        const nz = dist > 0.0001 ? dz / dist : 1;
         p1.x = Math.max(-RING_LIMIT, Math.min(RING_LIMIT, p1.x - nx * overlap));
         p1.z = Math.max(-RING_LIMIT, Math.min(RING_LIMIT, p1.z - nz * overlap));
         p2.x = Math.max(-RING_LIMIT, Math.min(RING_LIMIT, p2.x + nx * overlap));
         p2.z = Math.max(-RING_LIMIT, Math.min(RING_LIMIT, p2.z + nz * overlap));
       }
 
-      // Envia snapshot de sincronização para os dois lutadores
-      io.to(p1.id).emit('fight_state', {
+      // Envia snapshot de sincronização sem acumular fila em caso de lag
+      io.to(p1.id).volatile.emit('fight_state', {
         you: { x: p1.x, z: p1.z, rotY: p1.rotY, hp: p1.hp },
         opponent: { x: p2.x, z: p2.z, rotY: p2.rotY, hp: p2.hp }
       });
-      io.to(p2.id).emit('fight_state', {
+      io.to(p2.id).volatile.emit('fight_state', {
         you: { x: p2.x, z: p2.z, rotY: p2.rotY, hp: p2.hp },
         opponent: { x: p1.x, z: p1.z, rotY: p1.rotY, hp: p1.hp }
       });
