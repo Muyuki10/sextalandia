@@ -1,0 +1,13 @@
+{
+  "name": "ring-brawl-3d",
+  "version": "1.0.0",
+  "description": "Jogo de luta multiplayer 3D em primeira pessoa para Mobile Web",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5"
+  }
+}
